@@ -1,7 +1,6 @@
 
 function gitprompt {
-  dir=$(pwd)
-  gitDir="$dir/.git"
+  gitDir="./.git"
   gitConfig="$gitDir/config"
 
   if [ ! -d $gitDir ]; then
