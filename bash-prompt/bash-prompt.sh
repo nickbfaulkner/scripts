@@ -7,7 +7,7 @@ function gitprompt {
     return
   fi
 
-  cleanString=$(if git status | grep -q 'working directory clean'; then echo ""; else echo '*'; fi)
+  cleanString=$(if git status | grep -q 'working tree clean'; then echo ""; else echo '*'; fi)
   branchName=$(git branch | grep '^*' | sed 's/^* //g')
  
   if grep --quiet "$branchName" $gitConfig; then
