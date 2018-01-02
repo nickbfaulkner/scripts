@@ -1,3 +1,1 @@
-
-bash-prompt - custom bash prompt scheme showing git details amongst other things
-
+Collection of scripts that don't belong anywhere else

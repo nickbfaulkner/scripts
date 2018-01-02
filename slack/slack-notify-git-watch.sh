@@ -4,6 +4,8 @@
 # USAGE:
 # ./slack-notify-git-watch.sh /path/to/git/repo https://url.of/slack/wehbook
 #
+# https://github.com/nickbfaulkner/scripts/blob/master/slack/slack-notify-git-watch.sh
+# 
 
 GIT_REPO=$1
 SLACK_WEBHOOK=$2
