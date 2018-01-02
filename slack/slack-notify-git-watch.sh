@@ -1,9 +1,14 @@
 #! /bin/bash
 
+#
+# USAGE:
+# ./slack-notify-git-watch.sh /path/to/git/repo https://url.of/slack/wehbook
+#
+
 GIT_REPO=$1
 SLACK_WEBHOOK=$2
 GIT_DATA_DIRECTORY="${GIT_REPO}/.git/"
-SECONDS_BETWEEN_CHECKS=1
+SECONDS_BETWEEN_CHECKS=60
 
 echo "Watching git repo at ${GIT_REPO} and posting to Slack webhook: ${SLACK_WEBHOOK}"
 
@@ -18,7 +23,7 @@ function get_last_git_message() {
 
 function notify_slack_of_git_change() {
     git_log=$1
-    
+
     echo
     echo "New Git change detected..."
     echo $git_log
@@ -34,9 +39,9 @@ echo "Starting watching for new changes. Current version is: ${CURRENT_GIT_MESSA
 
 while true; do
     sleep $SECONDS_BETWEEN_CHECKS
-    
+
     NEW_GIT_MESSAGE=$(get_last_git_message)
-    
+
     if [ "${NEW_GIT_MESSAGE}" != "${CURRENT_GIT_MESSAGE}" ]; then
         notify_slack_of_git_change "${NEW_GIT_MESSAGE}"
         CURRENT_GIT_MESSAGE="${NEW_GIT_MESSAGE}"
