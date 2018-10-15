@@ -11,6 +11,8 @@ import (
 	"github.com/aws/aws-sdk-go/aws/endpoints"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/aws/aws-sdk-go/service/elb"
+	"github.com/aws/aws-sdk-go/service/elbv2"
 )
 
 func getNameTag(tags []*ec2.Tag) string {
@@ -51,10 +53,20 @@ func isCidrBlockPublic(cidrBlockString string) bool {
 	return true
 }
 
-func main() {
-	svc := ec2.New(session.New(), &aws.Config{
+func createAWSClients() (ec2.EC2, elb.ELB, elbv2.ELBV2) {
+	session := session.New()
+	config := &aws.Config{
 		Region: aws.String(endpoints.EuWest1RegionID),
-	})
+	}
+
+	ec2Svc := ec2.New(session, config)
+	elbSvc := elb.New(session, config)
+	elbV2Svc := elbv2.New(session, config)
+
+	return *ec2Svc, *elbSvc, *elbV2Svc
+}
+
+func fetchInstancesWithPublicIPs(ec2Svc ec2.EC2, region string) []*ec2.Instance {
 
 	request := &ec2.DescribeInstancesInput{
 		Filters: []*ec2.Filter{
@@ -65,7 +77,7 @@ func main() {
 		},
 	}
 
-	result, err := svc.DescribeInstances(request)
+	result, err := ec2Svc.DescribeInstances(request)
 
 	if err != nil {
 		fmt.Println("Error", err)
@@ -75,10 +87,7 @@ func main() {
 
 	for _, reservation := range result.Reservations {
 		for _, instance := range reservation.Instances {
-			nameTag := getNameTag(instance.Tags)
-
 			if instance.PublicIpAddress == nil {
-				fmt.Println(nameTag, "has no public IP")
 				continue
 			}
 
@@ -86,9 +95,13 @@ func main() {
 		}
 	}
 
+	return instancesWithPublicIP
+}
+
+func printInstancesWithPublicIPs(instancesWithPublicIP []*ec2.Instance) {
 	printHeader("Instances With Public IPs")
 
-	ipsWriter := tabwriter.NewWriter(os.Stdout, 0, 0, 1, ' ', 0)
+	ipsWriter := newTabWriter()
 	for _, instance := range instancesWithPublicIP {
 		nameTag := getNameTag(instance.Tags)
 
@@ -98,66 +111,197 @@ func main() {
 		fmt.Fprintln(ipsWriter, nameTag, "\t", instanceID, "\t", ip)
 	}
 	ipsWriter.Flush()
+}
 
-	printHeader("Open Inbound Routes")
+func newTabWriter() *tabwriter.Writer {
+	return tabwriter.NewWriter(os.Stdout, 0, 0, 1, ' ', 0)
+}
 
-	routesWriter := tabwriter.NewWriter(os.Stdout, 0, 0, 1, ' ', 0)
+type IngressRule struct {
+	Cidr                 string
+	PortRange            string
+	PortRangeDescription string
+}
+
+func getSecurityGroupPublicIngressRules(sg ec2.SecurityGroup) []IngressRule {
+	ingressRules := []IngressRule{}
+
+	for _, ingress := range sg.IpPermissions {
+
+		portRangeString := "n/a"
+		if ingress.FromPort != nil {
+			fromString := strconv.FormatInt(*ingress.FromPort, 10)
+			toString := strconv.FormatInt(*ingress.ToPort, 10)
+			if fromString == "-1" {
+				portRangeString = "*"
+			} else if fromString == toString {
+				portRangeString = fromString
+			} else {
+				portRangeString = fromString + " - " + toString
+			}
+		}
+
+		for _, ipRange := range ingress.IpRanges {
+
+			rangeDescriptionString := "no description"
+			if ipRange.Description != nil {
+				rangeDescriptionString = *ipRange.Description
+			}
+
+			cidr := *ipRange.CidrIp
+			if isCidrBlockPublic(cidr) {
+				rule := IngressRule{
+					Cidr:                 cidr,
+					PortRange:            portRangeString,
+					PortRangeDescription: rangeDescriptionString,
+				}
+				ingressRules = append(ingressRules, rule)
+			}
+		}
+	}
+
+	return ingressRules
+}
+
+func getSecurityGroupByID(ec2Svc ec2.EC2, id string) ec2.SecurityGroup {
+	input := &ec2.DescribeSecurityGroupsInput{
+		GroupIds: []*string{
+			&id,
+		},
+	}
+
+	result, err := ec2Svc.DescribeSecurityGroups(input)
+
+	if err != nil {
+		fmt.Println("Error", err)
+	}
+
+	return *result.SecurityGroups[0]
+}
+
+func printInstanceInboundRoutes(ec2Svc ec2.EC2, instancesWithPublicIP []*ec2.Instance) {
+	printHeader("Open Inbound Instance Routes")
+
+	routesWriter := newTabWriter()
 	for _, instance := range instancesWithPublicIP {
 		nameTag := getNameTag(instance.Tags)
 		ip := *instance.PublicIpAddress
 
 		for _, sgID := range instance.SecurityGroups {
 
-			input := &ec2.DescribeSecurityGroupsInput{
-				GroupIds: []*string{
-					sgID.GroupId,
-				},
-			}
+			securityGroup := getSecurityGroupByID(ec2Svc, *sgID.GroupId)
 
-			result, err := svc.DescribeSecurityGroups(input)
-
-			if err != nil {
-				fmt.Println("Error", err)
-			}
-
-			for _, sg := range result.SecurityGroups {
-				for _, ingress := range sg.IpPermissions {
-
-					portRangeString := "n/a"
-					if ingress.FromPort != nil {
-						fromString := strconv.FormatInt(*ingress.FromPort, 10)
-						toString := strconv.FormatInt(*ingress.ToPort, 10)
-						if fromString == "-1" {
-							portRangeString = "*"
-						} else if fromString == toString {
-							portRangeString = fromString
-						} else {
-							portRangeString = fromString + " - " + toString
-						}
-					}
-
-					for _, ipRange := range ingress.IpRanges {
-
-						rangeDescriptionString := "no description"
-						if ipRange.Description != nil {
-							rangeDescriptionString = *ipRange.Description
-						}
-
-						cidr := *ipRange.CidrIp
-						if isCidrBlockPublic(cidr) {
-							fmt.Fprintln(routesWriter,
-								nameTag, "\t",
-								ip, "\t",
-								portRangeString, "\t",
-								cidr, "\t",
-								rangeDescriptionString, "\t",
-							)
-						}
-					}
-				}
+			for _, rule := range getSecurityGroupPublicIngressRules(securityGroup) {
+				fmt.Fprintln(routesWriter,
+					nameTag, "\t",
+					ip, "\t",
+					rule.PortRange, "\t",
+					rule.Cidr, "\t",
+					rule.PortRangeDescription, "\t",
+				)
 			}
 		}
 	}
 
 	routesWriter.Flush()
+}
+
+func fetchALBs(elbSvc elbv2.ELBV2, region string) []*elbv2.LoadBalancer {
+	result, err := elbSvc.DescribeLoadBalancers(&elbv2.DescribeLoadBalancersInput{
+		PageSize: aws.Int64(400),
+	})
+
+	if err != nil {
+		fmt.Println("Error", err)
+	}
+
+	return result.LoadBalancers
+}
+
+func fetchELBs(elbSvc elb.ELB, region string) []*elb.LoadBalancerDescription {
+	result, err := elbSvc.DescribeLoadBalancers(&elb.DescribeLoadBalancersInput{
+		PageSize: aws.Int64(400),
+	})
+
+	if err != nil {
+		fmt.Println("Error", err)
+	}
+
+	return result.LoadBalancerDescriptions
+}
+
+func printALBInboundRoutes(ec2Svc ec2.EC2, loadBalancers []*elbv2.LoadBalancer) {
+	printHeader("Public ALBs (and NLBs)")
+
+	writer := newTabWriter()
+
+	for _, lb := range loadBalancers {
+
+		if *lb.Scheme == "internal" {
+			continue
+		}
+
+		for _, sgID := range lb.SecurityGroups {
+
+			securityGroup := getSecurityGroupByID(ec2Svc, *sgID)
+
+			for _, ingressRule := range getSecurityGroupPublicIngressRules(securityGroup) {
+				fmt.Fprintln(writer,
+					*lb.LoadBalancerName, "\t",
+					*lb.DNSName, "\t",
+					ingressRule.Cidr, "\t",
+					ingressRule.PortRange, "\t",
+					ingressRule.PortRangeDescription, "\t",
+				)
+			}
+		}
+
+	}
+
+	writer.Flush()
+}
+
+func printELBInboundRoutes(ec2Svc ec2.EC2, loadBalancers []*elb.LoadBalancerDescription) {
+	printHeader("Public ELBs")
+
+	writer := newTabWriter()
+
+	for _, lb := range loadBalancers {
+
+		if *lb.Scheme == "internal" {
+			continue
+		}
+
+		for _, sgID := range lb.SecurityGroups {
+
+			securityGroup := getSecurityGroupByID(ec2Svc, *sgID)
+
+			for _, ingressRule := range getSecurityGroupPublicIngressRules(securityGroup) {
+				fmt.Fprintln(writer,
+					*lb.LoadBalancerName, "\t",
+					*lb.DNSName, "\t",
+					ingressRule.Cidr, "\t",
+					ingressRule.PortRange, "\t",
+					ingressRule.PortRangeDescription, "\t",
+				)
+			}
+		}
+
+	}
+
+	writer.Flush()
+}
+
+func main() {
+	ec2Svc, elbSvc, elbV2Svc := createAWSClients()
+
+	instancesWithPublicIP := fetchInstancesWithPublicIPs(ec2Svc, endpoints.EuWest1RegionID)
+	printInstancesWithPublicIPs(instancesWithPublicIP)
+	printInstanceInboundRoutes(ec2Svc, instancesWithPublicIP)
+
+	albs := fetchALBs(elbV2Svc, endpoints.EuWest1RegionID)
+	printALBInboundRoutes(ec2Svc, albs)
+
+	elbs := fetchELBs(elbSvc, endpoints.EuWest1RegionID)
+	printELBInboundRoutes(ec2Svc, elbs)
 }
