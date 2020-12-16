@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/aws/aws-sdk-go/service/elb"
 	"github.com/aws/aws-sdk-go/service/elbv2"
+	"github.com/aws/aws-sdk-go/service/rds"
 )
 
 func getNameTag(tags []*ec2.Tag) string {
@@ -53,7 +54,7 @@ func isCidrBlockPublic(cidrBlockString string) bool {
 	return true
 }
 
-func createAWSClients() (ec2.EC2, elb.ELB, elbv2.ELBV2) {
+func createAWSClients() (ec2.EC2, elb.ELB, elbv2.ELBV2, rds.RDS) {
 	session := session.New()
 	config := &aws.Config{
 		Region: aws.String(endpoints.EuWest1RegionID),
@@ -62,8 +63,9 @@ func createAWSClients() (ec2.EC2, elb.ELB, elbv2.ELBV2) {
 	ec2Svc := ec2.New(session, config)
 	elbSvc := elb.New(session, config)
 	elbV2Svc := elbv2.New(session, config)
+	rdsSvc := rds.New(session, config)
 
-	return *ec2Svc, *elbSvc, *elbV2Svc
+	return *ec2Svc, *elbSvc, *elbV2Svc, *rdsSvc
 }
 
 func fetchInstancesWithPublicIPs(ec2Svc ec2.EC2, region string) []*ec2.Instance {
@@ -292,8 +294,49 @@ func printELBInboundRoutes(ec2Svc ec2.EC2, loadBalancers []*elb.LoadBalancerDesc
 	writer.Flush()
 }
 
+func printRDSInboundRoutes(ec2Svc ec2.EC2, instances []*rds.DBInstance) {
+	printHeader("Public RDS Instances")
+
+	writer := newTabWriter()
+
+	for _, db := range instances {
+
+		if !*db.PubliclyAccessible {
+			continue
+		}
+
+		for _, sgID := range db.VpcSecurityGroups {
+
+			securityGroup := getSecurityGroupByID(ec2Svc, *sgID.VpcSecurityGroupId)
+
+			for _, ingressRule := range getSecurityGroupPublicIngressRules(securityGroup) {
+				fmt.Fprintln(writer,
+					*db.DBInstanceIdentifier, "\t",
+					*db.Endpoint, "\t",
+					ingressRule.Cidr, "\t",
+					ingressRule.PortRange, "\t",
+					ingressRule.PortRangeDescription, "\t",
+				)
+			}
+		}
+
+	}
+
+	writer.Flush()
+}
+
+func fetchRDSInstances(rdsSvc rds.RDS, region string) []*rds.DBInstance {
+	result, err := rdsSvc.DescribeDBInstances(nil)
+
+	if err != nil {
+		fmt.Println("Error", err)
+	}
+
+	return result.DBInstances
+}
+
 func main() {
-	ec2Svc, elbSvc, elbV2Svc := createAWSClients()
+	ec2Svc, elbSvc, elbV2Svc, rdsSvc := createAWSClients()
 
 	instancesWithPublicIP := fetchInstancesWithPublicIPs(ec2Svc, endpoints.EuWest1RegionID)
 	printInstancesWithPublicIPs(instancesWithPublicIP)
@@ -304,4 +347,7 @@ func main() {
 
 	elbs := fetchELBs(elbSvc, endpoints.EuWest1RegionID)
 	printELBInboundRoutes(ec2Svc, elbs)
+
+	rdsInstances := fetchRDSInstances(rdsSvc, endpoints.EuWest1RegionID)
+	printRDSInboundRoutes(ec2Svc, rdsInstances)
 }
